@@ -462,71 +462,104 @@ def render_new_round_tab(user_id: str):
     st.write(f"**Tyyppi:** {'Päättyvä rata' if hole['is_ending_hole'] else 'Kenttärata'}")
     st.write(f"**Esteellinen:** {'Kyllä' if hole['has_obstacle'] else 'Ei'}")
 
-    with st.form(f"play_hole_{hole['id']}"):
-        strokes = st.number_input("Lyönnit", min_value=1, max_value=20, value=1, step=1)
-        shot_rows = []
-        if strokes == 1:
-            st.info("Piikki – yksi lyönti, ei lisäkysymyksiä.")
-        else:
-            st.markdown("### Lyöntikohtaiset tiedot")
-            for i in range(1, int(strokes) + 1):
-                with st.expander(f"Lyönti {i}", expanded=(i == 1 or i == int(strokes))):
-                    went_in = st.checkbox(f"Lyönti {i} meni sisään", value=(i == int(strokes)), key=f"went_in_{hole['id']}_{i}")
-                    went_through = st.checkbox(f"Lyönti {i} meni läpi", key=f"went_through_{hole['id']}_{i}") if hole["is_lane_hole"] else False
-                    hit_obstacle = st.checkbox(f"Lyönti {i} osui esteeseen", key=f"hit_obstacle_{hole['id']}_{i}") if hole["has_obstacle"] else False
-                    direction_error = st.selectbox(
-                        f"Suunta – lyönti {i}", ["none", "left", "right"], key=f"direction_error_{hole['id']}_{i}",
-                        format_func=lambda x: {"none": "Ei suuntavirhettä", "left": "Vasen", "right": "Oikea"}[x]
-                    )
-                    speed_error = st.selectbox(
-                        f"Vauhti – lyönti {i}", ["none", "too_slow", "too_hard"], key=f"speed_error_{hole['id']}_{i}",
-                        format_func=lambda x: {"none": "Ei vauhtivirhettä", "too_slow": "Liian hidas", "too_hard": "Liian luja"}[x]
-                    )
-                    shot_rows.append({
-                        "shot_number": i,
-                        "went_in": bool(went_in),
-                        "went_through": bool(went_through),
-                        "hit_obstacle": bool(hit_obstacle),
-                        "direction_error": direction_error,
-                        "speed_error": speed_error,
-                    })
-        notes = st.text_area("Muistiinpanot radasta (valinnainen)")
-        submitted = st.form_submit_button("Tallenna rata")
-        if submitted:
-            try:
-                rh_result = supabase.table("round_holes").insert({
-                    "round_id": st.session_state.current_round_id,
-                    "course_hole_id": hole["id"],
-                    "hole_sequence_number": hole["hole_number"],
-                    "total_strokes": int(strokes),
-                    "went_straight_in": bool(strokes == 1),
-                    "notes": notes.strip() or None,
+    strokes_key = f"strokes_{hole['id']}"
+    notes_key = f"notes_{hole['id']}"
+
+    left, right = st.columns([1, 1])
+    with left:
+        strokes = st.number_input("Lyönnit", min_value=1, max_value=20, value=st.session_state.get(strokes_key, 1), step=1, key=strokes_key)
+    with right:
+        notes = st.text_input("Muistiinpanot radasta (valinnainen)", value=st.session_state.get(notes_key, ""), key=notes_key)
+
+    shot_rows = []
+    if int(strokes) > 1:
+        st.markdown("### Lyöntikohtaiset tiedot")
+        for i in range(1, int(strokes) + 1):
+            with st.expander(f"Lyönti {i}", expanded=(i == 1 or i == int(strokes))):
+                went_in = st.checkbox(f"Lyönti {i} meni sisään", value=(i == int(strokes)), key=f"went_in_{hole['id']}_{i}")
+                went_through = st.checkbox(f"Lyönti {i} meni läpi", key=f"went_through_{hole['id']}_{i}") if hole["is_lane_hole"] else False
+                hit_obstacle = st.checkbox(f"Lyönti {i} osui esteeseen", key=f"hit_obstacle_{hole['id']}_{i}") if hole["has_obstacle"] else False
+                direction_error = st.selectbox(
+                    f"Suunta – lyönti {i}", ["none", "left", "right"], key=f"direction_error_{hole['id']}_{i}",
+                    format_func=lambda x: {"none": "Ei suuntavirhettä", "left": "Vasen", "right": "Oikea"}[x]
+                )
+                speed_error = st.selectbox(
+                    f"Vauhti – lyönti {i}", ["none", "too_slow", "too_hard"], key=f"speed_error_{hole['id']}_{i}",
+                    format_func=lambda x: {"none": "Ei vauhtivirhettä", "too_slow": "Liian hidas", "too_hard": "Liian luja"}[x]
+                )
+                shot_rows.append({
+                    "shot_number": i,
+                    "went_in": bool(went_in),
+                    "went_through": bool(went_through),
+                    "hit_obstacle": bool(hit_obstacle),
+                    "direction_error": direction_error,
+                    "speed_error": speed_error,
+                })
+
+    b1, b2 = st.columns([1, 1])
+    save_clicked = b1.button("Tallenna rata", type="primary")
+    cancel_clicked = b2.button("Peruuta tämän radan tiedot")
+
+    if cancel_clicked:
+        st.session_state[strokes_key] = 1
+        st.session_state[notes_key] = ""
+        for i in range(1, 21):
+            for prefix, default in [
+                ("went_in", False),
+                ("went_through", False),
+                ("hit_obstacle", False),
+            ]:
+                key = f"{prefix}_{hole['id']}_{i}"
+                if key in st.session_state:
+                    st.session_state[key] = default
+            for prefix, default in [
+                ("direction_error", "none"),
+                ("speed_error", "none"),
+            ]:
+                key = f"{prefix}_{hole['id']}_{i}"
+                if key in st.session_state:
+                    st.session_state[key] = default
+        st.rerun()
+
+    if save_clicked:
+        try:
+            rh_result = supabase.table("round_holes").insert({
+                "round_id": st.session_state.current_round_id,
+                "course_hole_id": hole["id"],
+                "hole_sequence_number": hole["hole_number"],
+                "total_strokes": int(strokes),
+                "went_straight_in": bool(int(strokes) == 1),
+                "notes": (notes or "").strip() or None,
+            }).execute()
+            round_hole_id = rh_result.data[0]["id"]
+
+            if int(strokes) == 1:
+                supabase.table("shots").insert({
+                    "round_hole_id": round_hole_id,
+                    "shot_number": 1,
+                    "went_in": True,
+                    "went_through": False,
+                    "hit_obstacle": False,
+                    "direction_error": "none",
+                    "speed_error": "none",
                 }).execute()
-                round_hole_id = rh_result.data[0]["id"]
-                if strokes == 1:
-                    supabase.table("shots").insert({
-                        "round_hole_id": round_hole_id,
-                        "shot_number": 1,
-                        "went_in": True,
-                        "went_through": False,
-                        "hit_obstacle": False,
-                        "direction_error": "none",
-                        "speed_error": "none",
-                    }).execute()
-                else:
-                    if shot_rows and shot_rows[-1]["went_in"] is not True:
-                        shot_rows[-1]["went_in"] = True
-                    payload = []
-                    for row in shot_rows:
-                        item = row.copy()
-                        item["round_hole_id"] = round_hole_id
-                        payload.append(item)
-                    supabase.table("shots").insert(payload).execute()
-                st.session_state.current_hole_pos += 1
-                st.success("Rata tallennettu.")
-                st.rerun()
-            except Exception as e:
-                st.error(f"Radan tallennus epäonnistui: {e}")
+            else:
+                if shot_rows and shot_rows[-1]["went_in"] is not True:
+                    shot_rows[-1]["went_in"] = True
+                payload = []
+                for row in shot_rows:
+                    item = row.copy()
+                    item["round_hole_id"] = round_hole_id
+                    payload.append(item)
+                supabase.table("shots").insert(payload).execute()
+
+            st.session_state.current_hole_pos += 1
+            st.session_state[strokes_key] = 1
+            st.session_state[notes_key] = ""
+            st.success("Rata tallennettu.")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Radan tallennus epäonnistui: {e}")
 
 
 def render_history_tab(user_id: str):
