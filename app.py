@@ -332,7 +332,7 @@ def main_view():
     st.caption(f"Kirjautunut: {(profile or {}).get('display_name') or 'Pelaaja'}")
     with st.sidebar:
         st.markdown("### Kenttäsäännöt")
-        st.markdown("- Eterniitti → par 18")
+        st.markdown("- Eterniitti → par 18"
 - Betoni → par 27
 - Huopa / MOS → par 36
 - Jokaisella kentällä täytyy olla tasan 18 rataa")
