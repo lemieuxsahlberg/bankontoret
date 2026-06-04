@@ -1,3 +1,4 @@
 streamlit
-supabasesupabase
+supabase
+pandas
 python-dateutil
