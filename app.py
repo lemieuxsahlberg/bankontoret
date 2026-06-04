@@ -962,4 +962,3 @@ with open('app.py', 'w', encoding='utf-8') as f:
 
 py_compile.compile('app.py', doraise=True)
 print('saved ok', os.path.getsize('app.py'))
-"}
