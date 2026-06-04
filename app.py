@@ -956,7 +956,7 @@ if current_user_id() is None:
     auth_view()
 else:
     main_view()
-''')
+'')
 
 with open('app.py', 'w', encoding='utf-8') as f:
     f.write(app_code)
