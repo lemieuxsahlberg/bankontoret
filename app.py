@@ -67,10 +67,7 @@ def current_user_email():
 
 def is_admin():
     email = current_user_email()
-    if not email:
-        return False
-    return email.strip().lower() == ADMIN_EMAIL.strip().lower()
-
+    return bool(email and email.lower() == ADMIN_EMAIL)
 
 
 def ensure_profile_exists(user_id, display_name):
