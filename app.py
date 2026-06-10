@@ -11,33 +11,32 @@ SURFACE_OPTIONS = ["eterniitti", "betoni", "huopa", "MOS"]
 PAR_BY_SURFACE = {"eterniitti": 18, "betoni": 27, "huopa": 36, "MOS": 36}
 ROUND_TYPE_OPTIONS = ["harjoitus", "kisa"]
 ROUND_STATUS_OPTIONS = ["completed", "draft", "abandoned"]
+STATUS_LABELS = {"completed": "valmis", "draft": "kesken", "abandoned": "hylätty"}
+STATUS_LABEL_TO_VALUE = {v: k for k, v in STATUS_LABELS.items()}
 ADMIN_EMAIL = "gretasofiaisabella@gmail.com"
 MAX_HOLES = 18
 
-STATUS_LABELS = {
-    "completed": "valmis",
-    "draft": "kesken",
-    "abandoned": "hylätty",
-}
-STATUS_LABEL_TO_VALUE = {v: k for k, v in STATUS_LABELS.items()}
-
-
+# =========================================================
+# UI / apurit
+# =========================================================
 def apply_custom_css():
     st.markdown(
         """
         <style>
             .block-container {padding-top: 1rem; padding-bottom: 2rem; max-width: 1100px;}
+            #MainMenu {visibility: hidden;}
+            header[data-testid="stHeader"] {visibility: hidden; height: 0;}
+            [data-testid="stToolbar"] {display: none !important;}
+            [data-testid="stDecoration"] {display: none !important;}
+            section[data-testid="stSidebar"] {display:none !important;}
+            footer {visibility: hidden;}
             div[data-testid="stMetric"] {
                 background: #f8fafc;
                 border: 1px solid #e2e8f0;
                 border-radius: 12px;
                 padding: .65rem .85rem;
             }
-            #MainMenu {visibility: hidden;}
-            header[data-testid="stHeader"] {visibility: hidden; height: 0;}
-            [data-testid="stToolbar"] {display: none !important;}
-            [data-testid="stDecoration"] {display: none !important;}
-            footer {visibility: hidden;}
+            .small-muted {color:#64748b; font-size:0.92rem;}
         </style>
         """,
         unsafe_allow_html=True,
@@ -46,6 +45,12 @@ def apply_custom_css():
 
 def safe_data(resp):
     return getattr(resp, "data", None) or []
+
+
+def title_block(title, subtitle=None):
+    st.subheader(title)
+    if subtitle:
+        st.caption(subtitle)
 
 
 def ui_error(message, err):
@@ -61,12 +66,6 @@ def to_date(value):
         return datetime.fromisoformat(str(value)).date()
     except Exception:
         return None
-
-
-def title_block(title, subtitle=None):
-    st.subheader(title)
-    if subtitle:
-        st.caption(subtitle)
 
 
 def format_status(value):
@@ -113,19 +112,21 @@ def render_band_badge(surface, total_score):
         unsafe_allow_html=True,
     )
 
-
-# -----------------------------
-# Auth & session
-# -----------------------------
+# =========================================================
+# Session / auth
+# =========================================================
 def init_state():
     defaults = {
         "access_token": None,
         "refresh_token": None,
         "user": None,
+        "view": "Etusivu",
         "current_round_id": None,
         "current_course_id": None,
         "current_holes": [],
         "current_hole_pos": 0,
+        "current_round_holes_map": {},
+        "current_round_shots_map": {},
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -161,16 +162,18 @@ def current_user_email():
     return getattr(st.session_state.user, "email", None) if st.session_state.user else None
 
 
+def is_admin():
+    email = current_user_email()
+    return bool(email and email.strip().lower() == ADMIN_EMAIL.strip().lower())
+
+
 def clear_round_state():
     st.session_state.current_round_id = None
     st.session_state.current_course_id = None
     st.session_state.current_holes = []
     st.session_state.current_hole_pos = 0
-
-
-def is_admin():
-    email = current_user_email()
-    return bool(email and email.strip().lower() == ADMIN_EMAIL.strip().lower())
+    st.session_state.current_round_holes_map = {}
+    st.session_state.current_round_shots_map = {}
 
 
 def send_password_reset(email: str):
@@ -184,10 +187,45 @@ def send_password_reset(email: str):
         return auth_obj.reset_password_email(email)
     raise AttributeError("Salasanan palautusmetodia ei löytynyt Supabase-kirjastosta.")
 
+# =========================================================
+# Cache
+# =========================================================
+@st.cache_data(ttl=60)
+def cached_get_profile(user_id):
+    rows = safe_data(supabase.table("profiles").select("*").eq("user_id", user_id).execute())
+    return rows[0] if rows else None
 
-# -----------------------------
+@st.cache_data(ttl=60)
+def cached_get_all_courses():
+    try:
+        return safe_data(supabase.table("courses").select("*").order("name").execute())
+    except Exception:
+        return []
+
+@st.cache_data(ttl=60)
+def cached_get_course(course_id):
+    rows = safe_data(supabase.table("courses").select("*").eq("id", course_id).execute())
+    return rows[0] if rows else None
+
+@st.cache_data(ttl=60)
+def cached_get_course_holes(course_id):
+    return safe_data(supabase.table("course_holes").select("*").eq("course_id", course_id).order("hole_number").execute())
+
+@st.cache_data(ttl=30)
+def cached_get_rounds(user_id):
+    return safe_data(supabase.table("rounds").select("*").eq("user_id", user_id).order("played_at", desc=True).execute())
+
+
+def clear_app_caches():
+    cached_get_profile.clear()
+    cached_get_all_courses.clear()
+    cached_get_course.clear()
+    cached_get_course_holes.clear()
+    cached_get_rounds.clear()
+
+# =========================================================
 # Profiilit
-# -----------------------------
+# =========================================================
 def ensure_profile_exists(user_id, display_name):
     rows = safe_data(supabase.table("profiles").select("user_id, display_name").eq("user_id", user_id).execute())
     wanted = (display_name or "Pelaaja").strip() or "Pelaaja"
@@ -195,11 +233,11 @@ def ensure_profile_exists(user_id, display_name):
         supabase.table("profiles").insert({"user_id": user_id, "display_name": wanted}).execute()
     elif rows[0].get("display_name") != wanted:
         supabase.table("profiles").update({"display_name": wanted}).eq("user_id", user_id).execute()
+    clear_app_caches()
 
 
 def get_profile(user_id):
-    rows = safe_data(supabase.table("profiles").select("*").eq("user_id", user_id).execute())
-    return rows[0] if rows else None
+    return cached_get_profile(user_id)
 
 
 def update_profile_name(user_id, display_name):
@@ -211,6 +249,7 @@ def update_profile_name(user_id, display_name):
         supabase.table("profiles").update({"display_name": value}).eq("user_id", user_id).execute()
     else:
         supabase.table("profiles").insert({"user_id": user_id, "display_name": value}).execute()
+    clear_app_caches()
 
 
 def get_display_name(user_id):
@@ -219,23 +258,22 @@ def get_display_name(user_id):
         return profile["display_name"]
     return "Pelaaja"
 
-
-# -----------------------------
+# =========================================================
 # Kentät
-# -----------------------------
+# =========================================================
 def get_all_courses():
-    try:
-        return safe_data(supabase.table("courses").select("*").order("name").execute())
-    except Exception:
-        return []
+    return cached_get_all_courses()
 
 
 def get_course(course_id):
-    rows = safe_data(supabase.table("courses").select("*").eq("id", course_id).execute())
-    return rows[0] if rows else None
+    return cached_get_course(course_id)
 
 
 def get_course_holes(course_id):
+    return cached_get_course_holes(course_id)
+
+
+def get_course_holes_fresh(course_id):
     return safe_data(supabase.table("course_holes").select("*").eq("course_id", course_id).order("hole_number").execute())
 
 
@@ -244,11 +282,8 @@ def can_edit_course(course):
 
 
 def update_course(course_id, name, location, surface):
-    supabase.table("courses").update({
-        "name": name.strip(),
-        "location": location.strip() or None,
-        "surface": surface,
-    }).eq("id", course_id).execute()
+    supabase.table("courses").update({"name": name.strip(), "location": location.strip() or None, "surface": surface}).eq("id", course_id).execute()
+    clear_app_caches()
 
 
 def update_course_hole(hole_id, hole_number, hole_name, is_ending_hole, has_obstacle):
@@ -267,18 +302,19 @@ def replace_hole_order(edited_rows):
         raise ValueError("Ratanumeroiden pitää olla ilman duplikaatteja järjestyksessä 1..n.")
     for row in edited_rows:
         update_course_hole(row["id"], row["hole_number"], row["hole_name"], row["is_ending_hole"], row["has_obstacle"])
+    clear_app_caches()
 
 
 def delete_course(course_id):
     supabase.table("course_holes").delete().eq("course_id", course_id).execute()
     supabase.table("courses").delete().eq("id", course_id).execute()
+    clear_app_caches()
 
-
-# -----------------------------
+# =========================================================
 # Kierrokset
-# -----------------------------
+# =========================================================
 def get_rounds(user_id):
-    return safe_data(supabase.table("rounds").select("*").eq("user_id", user_id).order("played_at", desc=True).execute())
+    return cached_get_rounds(user_id)
 
 
 def get_round(round_id):
@@ -286,21 +322,32 @@ def get_round(round_id):
     return rows[0] if rows else None
 
 
-def get_round_holes(round_id):
+def fetch_round_holes(round_id):
     return safe_data(supabase.table("round_holes").select("*").eq("round_id", round_id).order("hole_sequence_number").execute())
 
 
-def get_round_hole_by_sequence(round_id, seq):
-    rows = safe_data(supabase.table("round_holes").select("*").eq("round_id", round_id).eq("hole_sequence_number", seq).execute())
-    return rows[0] if rows else None
-
-
-def get_shots(round_hole_id):
+def fetch_shots(round_hole_id):
     return safe_data(supabase.table("shots").select("*").eq("round_hole_id", round_hole_id).order("shot_number").execute())
+
+
+def load_round_into_state(round_row):
+    holes = get_course_holes(round_row["course_id"])
+    rhs = fetch_round_holes(round_row["id"])
+    holes_map = {rh["hole_sequence_number"]: rh for rh in rhs}
+    shots_map = {}
+    for rh in rhs:
+        shots_map[rh["id"]] = fetch_shots(rh["id"])
+    st.session_state.current_round_id = round_row["id"]
+    st.session_state.current_course_id = round_row["course_id"]
+    st.session_state.current_holes = holes
+    st.session_state.current_hole_pos = min(len(rhs), len(holes))
+    st.session_state.current_round_holes_map = holes_map
+    st.session_state.current_round_shots_map = shots_map
 
 
 def update_round_status(round_id, status_value):
     supabase.table("rounds").update({"status": status_value}).eq("id", round_id).execute()
+    clear_app_caches()
 
 
 def update_round_meta(round_id, round_type, notes, status_value=None):
@@ -308,18 +355,20 @@ def update_round_meta(round_id, round_type, notes, status_value=None):
     if status_value is not None:
         payload["status"] = status_value
     supabase.table("rounds").update(payload).eq("id", round_id).execute()
+    clear_app_caches()
 
 
 def delete_round(round_id):
-    rhs = get_round_holes(round_id)
+    rhs = fetch_round_holes(round_id)
     for rh in rhs:
         supabase.table("shots").delete().eq("round_hole_id", rh["id"]).execute()
     supabase.table("round_holes").delete().eq("round_id", round_id).execute()
     supabase.table("rounds").delete().eq("id", round_id).execute()
+    clear_app_caches()
 
 
 def upsert_round_hole(round_id, hole, total_strokes, notes, shot_rows):
-    existing = get_round_hole_by_sequence(round_id, hole["hole_number"])
+    existing = st.session_state.current_round_holes_map.get(hole["hole_number"])
     payload = {
         "round_id": round_id,
         "course_hole_id": hole["id"],
@@ -335,9 +384,10 @@ def upsert_round_hole(round_id, hole, total_strokes, notes, shot_rows):
     else:
         res = supabase.table("round_holes").insert(payload).execute()
         rh_id = res.data[0]["id"]
+        existing = {"id": rh_id, **payload}
 
     if int(total_strokes) == 1:
-        supabase.table("shots").insert({
+        shots_rows = [{
             "round_hole_id": rh_id,
             "shot_number": 1,
             "went_in": True,
@@ -345,38 +395,41 @@ def upsert_round_hole(round_id, hole, total_strokes, notes, shot_rows):
             "hit_obstacle": False,
             "direction_error": "none",
             "speed_error": "none",
-        }).execute()
+        }]
+        supabase.table("shots").insert(shots_rows).execute()
     else:
-        rows = []
+        shots_rows = []
         for row in shot_rows:
             item = row.copy()
             item["round_hole_id"] = rh_id
-            rows.append(item)
-        if rows:
-            if not rows[-1]["went_in"]:
-                rows[-1]["went_in"] = True
-            supabase.table("shots").insert(rows).execute()
+            shots_rows.append(item)
+        if shots_rows:
+            if not shots_rows[-1]["went_in"]:
+                shots_rows[-1]["went_in"] = True
+            supabase.table("shots").insert(shots_rows).execute()
 
+    existing.update({"id": rh_id})
+    st.session_state.current_round_holes_map[hole["hole_number"]] = existing
+    st.session_state.current_round_shots_map[rh_id] = shots_rows if int(total_strokes) > 1 else [{
+        "shot_number": 1,
+        "went_in": True,
+        "went_through": False,
+        "hit_obstacle": False,
+        "direction_error": "none",
+        "speed_error": "none",
+    }]
+    clear_app_caches()
 
-def load_round_into_state(round_row):
-    holes = get_course_holes(round_row["course_id"])
-    saved = get_round_holes(round_row["id"])
-    st.session_state.current_round_id = round_row["id"]
-    st.session_state.current_course_id = round_row["course_id"]
-    st.session_state.current_holes = holes
-    st.session_state.current_hole_pos = min(len(saved), len(holes))
-
-
-# -----------------------------
-# Analyysi / historia
-# -----------------------------
+# =========================================================
+# Historia / analyysi
+# =========================================================
 def get_course_hole_averages(user_id, course_id):
-    rounds = safe_data(supabase.table("rounds").select("id").eq("user_id", user_id).eq("course_id", course_id).eq("status", "completed").execute())
+    rounds = [r for r in get_rounds(user_id) if r.get("course_id") == course_id and r.get("status") == "completed"]
     if not rounds:
         return []
     all_rhs = []
     for rnd in rounds:
-        all_rhs.extend(get_round_holes(rnd["id"]))
+        all_rhs.extend(fetch_round_holes(rnd["id"]))
     if not all_rhs:
         return []
     hole_map = {h["id"]: h["hole_number"] for h in get_course_holes(course_id)}
@@ -418,10 +471,10 @@ def get_analysis_metrics(user_id, surface_filter="kaikki", date_from=None, date_
     speed_counts = {"too_slow": 0, "too_hard": 0}
     eterniitti_scores = []
     for rnd, course in rounds_with_course:
-        rhs = get_round_holes(rnd["id"])
+        rhs = fetch_round_holes(rnd["id"])
         for rh in rhs:
             all_rhs.append(rh)
-            for shot in get_shots(rh["id"]):
+            for shot in fetch_shots(rh["id"]):
                 if shot.get("direction_error") == "left":
                     direction_counts["left"] += 1
                 elif shot.get("direction_error") == "right":
@@ -465,13 +518,19 @@ def get_analysis_metrics(user_id, surface_filter="kaikki", date_from=None, date_
         }
     return metrics
 
-
-# -----------------------------
-# UI views
-# -----------------------------
-def render_sidebar(user_id):
-    with st.sidebar:
-        st.markdown("### Tilanne")
+# =========================================================
+# Näkymät
+# =========================================================
+def render_topbar(user_id):
+    profile = get_profile(user_id)
+    left, middle, right = st.columns([4, 3, 1])
+    with left:
+        title_block("Bankontoret", f"Kirjautunut: {(profile or {}).get('display_name') or 'Pelaaja'}")
+    with middle:
+        options = ["Etusivu", "Kentät", "Kierros", "Historia", "Analyysi", "Profiili"]
+        current_view = st.session_state.view if st.session_state.view in options else "Etusivu"
+        st.session_state.view = st.radio("Näkymä", options, horizontal=True, label_visibility="collapsed", index=options.index(current_view))
+    with right:
         if st.button("Kirjaudu ulos"):
             try:
                 supabase.auth.sign_out()
@@ -482,25 +541,12 @@ def render_sidebar(user_id):
             st.session_state.user = None
             clear_round_state()
             st.rerun()
-        rounds = get_rounds(user_id)
-        st.metric("Valmiit kierrokset", len([r for r in rounds if r.get("status") == "completed"]))
-        st.metric("Keskeneräiset", len([r for r in rounds if r.get("status") == "draft"]))
-
-
-def render_dashboard(user_id):
-    title_block("Tervetuloa", "Huom: joukkueet on poistettu tästä vakaasta versiosta, jotta kierrossyöttö toimii varmasti.")
-    rounds = get_rounds(user_id)
-    courses = get_all_courses()
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Kentät", len(courses))
-    c2.metric("Valmiit kierrokset", len([r for r in rounds if r.get("status") == "completed"]))
-    c3.metric("Keskeneräiset kierrokset", len([r for r in rounds if r.get("status") == "draft"]))
-    st.info("Aloita näin: 1) lisää tai tarkista kenttä 2) aloita kierros 3) tallenna keskeneräinen tarvittaessa 4) katso historia ja analyysi.")
 
 
 def auth_view():
     st.title("Bankontoret")
-    st.caption("Kirjaudu tai luo käyttäjä. Jos sähköpostivahvistus ei toimi, korjaa Supabasen Auth asetusten Site URL / Redirect URL.")
+    st.caption("Kirjaudu tai luo käyttäjä. Huom: kova selainpäivitys voi kirjata ulos, koska istuntoa ei tallenneta selaimen pysyvään muistiin tässä versiossa.")
+    st.info("Sähköpostivahvistuslinkin 'sivu ei toimi' -ongelma liittyy yleensä Supabase Authin Site URL / Redirect URL -asetuksiin, ei itse app.py:hin.")
     col1, col2 = st.columns(2)
     with col1:
         title_block("Kirjaudu")
@@ -524,7 +570,7 @@ def auth_view():
             if st.form_submit_button("Luo käyttäjä"):
                 try:
                     supabase.auth.sign_up({"email": email, "password": password, "options": {"data": {"display_name": name}}})
-                    st.success("Käyttäjä luotu. Jos vahvistuslinkki ei toimi, korjaa se Supabasessa ennen käyttöönottoa.")
+                    st.success("Käyttäjä luotu. Jos vahvistuslinkki ei toimi, korjaa Redirect URL Supabasessa.")
                 except Exception as e:
                     ui_error("Käyttäjän luonti epäonnistui.", e)
         with st.expander("Unohtuiko salasana?"):
@@ -538,8 +584,19 @@ def auth_view():
                         ui_error("Salasanan palautus ei onnistunut.", e)
 
 
+def render_dashboard(user_id):
+    title_block("Etusivu", "Nyt renderöidään vain yksi näkymä kerrallaan. Tämä yleensä nopeuttaa käyttöä selvästi.")
+    rounds = get_rounds(user_id)
+    courses = get_all_courses()
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Kentät", len(courses))
+    c2.metric("Valmiit kierrokset", len([r for r in rounds if r.get("status") == "completed"]))
+    c3.metric("Keskeneräiset kierrokset", len([r for r in rounds if r.get("status") == "draft"]))
+    st.info("Aloita näin: 1) lisää tai tarkista kenttä 2) aloita kierros 3) tallenna keskeneräinen tarvittaessa 4) katso historia ja analyysi.")
+
+
 def render_courses(user_id):
-    title_block("Kentät", "Kaikki kirjautuneet näkevät samat kentät. Kentän omistaja tai pääkäyttäjä voi muokata ja poistaa kentän.")
+    title_block("Kentät", "Kentän muokkaus on korjattu niin, ettei radan nimen perässä näy enää teknistä merkkijonoa.")
     all_courses = get_all_courses()
     with st.expander("Luo uusi kenttä"):
         with st.form("new_course", clear_on_submit=True):
@@ -554,6 +611,7 @@ def render_courses(user_id):
                 else:
                     try:
                         supabase.table("courses").insert({"name": course_name.strip(), "location": location.strip() or None, "surface": surface, "owner_user_id": user_id}).execute()
+                        clear_app_caches()
                         st.success("Kenttä tallennettu.")
                         st.rerun()
                     except Exception as e:
@@ -574,7 +632,6 @@ def render_courses(user_id):
         st.dataframe(pd.DataFrame([{"#": h["hole_number"], "Nimi": h.get("hole_name") or "", "Tyyppi": "Päättyvä" if h.get("is_ending_hole") else "Kenttärata", "Esteellinen": "Kyllä" if h.get("has_obstacle") else "Ei"} for h in holes]), use_container_width=True, hide_index=True)
     else:
         st.info("Kentällä ei ole vielä ratoja.")
-
     if len(holes) < MAX_HOLES:
         with st.expander("Lisää uusi rata"):
             next_no = len(holes) + 1
@@ -586,35 +643,38 @@ def render_courses(user_id):
                 if st.form_submit_button(f"Tallenna rata {next_no}/18"):
                     try:
                         supabase.table("course_holes").insert({"course_id": course["id"], "hole_number": next_no, "hole_name": hole_name.strip() or None, "is_ending_hole": hole_type == "Päättyvä rata", "is_lane_hole": hole_type == "Kenttärata", "has_obstacle": bool(has_obstacle)}).execute()
+                        clear_app_caches()
                         st.success(f"Rata {next_no}/18 tallennettu.")
                         st.rerun()
                     except Exception as e:
                         ui_error("Radan tallennus epäonnistui.", e)
-
     if can_edit_course(course):
         st.markdown("### Muokkaa / poista kenttä")
         with st.expander("Muokkaa tätä kenttää"):
+            editable_holes = get_course_holes_fresh(course["id"])
             with st.form(f"edit_course_{course['id']}"):
                 new_name = st.text_input("Kentän nimi", value=course.get("name") or "")
                 new_location = st.text_input("Sijainti", value=course.get("location") or "")
                 new_surface = st.selectbox("Alusta", SURFACE_OPTIONS, index=SURFACE_OPTIONS.index(course.get("surface")) if course.get("surface") in SURFACE_OPTIONS else 0)
                 edited = []
-                for hole in holes:
-                    st.markdown(f"**Nykyinen rata {hole['hole_number']}**")
-                    ec1, ec2, ec3 = st.columns(3)
+                for hole in editable_holes:
+                    st.markdown(f"**Rata {hole['hole_number']}**")
+                    ec1, ec2, ec3 = st.columns([1,3,2])
                     with ec1:
-                        hole_number = st.number_input(f"Ratanumero #{hole['id']}", min_value=1, max_value=18, value=int(hole['hole_number']), step=1, key=f"edit_num_{hole['id']}")
+                        hole_number = st.number_input("Ratanumero", min_value=1, max_value=18, value=int(hole['hole_number']), step=1, key=f"edit_num_{hole['id']}")
                     with ec2:
-                        hole_name = st.text_input(f"Radan nimi #{hole['id']}", value=hole.get("hole_name") or "", key=f"edit_name_{hole['id']}")
+                        hole_name = st.text_input("Radan nimi", value=hole.get("hole_name") or "", key=f"edit_name_{hole['id']}")
                     with ec3:
-                        hole_type = st.radio(f"Ratatyyppi #{hole['id']}", ["Päättyvä rata", "Kenttärata"], horizontal=True, index=0 if hole.get("is_ending_hole") else 1, key=f"edit_type_{hole['id']}")
-                    has_obstacle = st.checkbox(f"Esteellinen #{hole['id']}", value=bool(hole.get("has_obstacle")), key=f"edit_obs_{hole['id']}")
+                        hole_type = st.radio("Ratatyyppi", ["Päättyvä rata", "Kenttärata"], horizontal=True, index=0 if hole.get("is_ending_hole") else 1, key=f"edit_type_{hole['id']}")
+                    has_obstacle = st.checkbox("Esteellinen", value=bool(hole.get("has_obstacle")), key=f"edit_obs_{hole['id']}")
                     edited.append({"id": hole["id"], "hole_number": int(hole_number), "hole_name": hole_name, "is_ending_hole": hole_type == "Päättyvä rata", "has_obstacle": bool(has_obstacle)})
                     st.divider()
                 if st.form_submit_button("Tallenna kentän muutokset"):
                     try:
+                        clear_app_caches()
                         update_course(course["id"], new_name, new_location, new_surface)
                         replace_hole_order(edited)
+                        clear_app_caches()
                         st.success("Kenttä päivitetty.")
                         st.rerun()
                     except Exception as e:
@@ -638,8 +698,8 @@ def render_draft_rounds(user_id):
     title_block("Jatka keskeneräistä kierrosta")
     labels, label_to_round = [], {}
     for rnd in rounds:
+        rhs = fetch_round_holes(rnd["id"])
         course = courses.get(rnd["course_id"], {})
-        rhs = get_round_holes(rnd["id"])
         label = f"{rnd.get('played_at')} – {course.get('name', 'Tuntematon')} ({len(rhs)}/18)"
         labels.append(label)
         label_to_round[label] = rnd
@@ -678,7 +738,7 @@ def render_current_round_controls(round_id):
 
 
 def render_new_round(user_id):
-    title_block("Kierros", "Aloita uusi kierros tai jatka keskeneräistä. Tämä vakaa versio ei käytä joukkueita, jotta syöttö toimii nopeasti.")
+    title_block("Kierros", "Tässä näkymässä haetaan vain kierrokseen tarvittava data, jotta syöttö olisi aiempaa nopeampaa.")
     courses = get_all_courses()
     if not courses:
         st.info("Luo ensin kenttä Kentät-välilehdellä.")
@@ -705,11 +765,13 @@ def render_new_round(user_id):
                     st.session_state.current_course_id = selected_course["id"]
                     st.session_state.current_holes = holes
                     st.session_state.current_hole_pos = 0
+                    st.session_state.current_round_holes_map = {}
+                    st.session_state.current_round_shots_map = {}
+                    clear_app_caches()
                     st.rerun()
                 except Exception as e:
                     ui_error("Kierroksen aloitus epäonnistui.", e)
         return
-
     current_round = get_round(st.session_state.current_round_id)
     if not current_round:
         clear_round_state()
@@ -723,9 +785,8 @@ def render_new_round(user_id):
     progress = min((pos) / len(holes), 1.0) if holes else 0
     st.progress(progress, text=f"Vaihe {min(pos+1, len(holes))}/{len(holes)}")
     if pos >= len(holes):
+        total = sum(r.get("total_strokes", 0) for r in st.session_state.current_round_holes_map.values())
         course = get_course(st.session_state.current_course_id)
-        rhs = get_round_holes(st.session_state.current_round_id)
-        total = sum(r.get("total_strokes", 0) for r in rhs)
         st.success("Kierros valmis")
         c1, c2, c3 = st.columns(3)
         c1.metric("Tulos", total)
@@ -741,9 +802,8 @@ def render_new_round(user_id):
             except Exception as e:
                 ui_error("Kierroksen päättäminen epäonnistui.", e)
         return
-    existing_map = {rh["hole_sequence_number"]: rh for rh in get_round_holes(st.session_state.current_round_id)}
     hole = holes[pos]
-    existing = existing_map.get(hole["hole_number"])
+    existing = st.session_state.current_round_holes_map.get(hole["hole_number"])
     hole_id = hole["id"]
     title_block(f"Rata {hole['hole_number']}", hole.get("hole_name") or None)
     st.write(f"**Tyyppi:** {'Päättyvä rata' if hole.get('is_ending_hole') else 'Kenttärata'}")
@@ -752,14 +812,13 @@ def render_new_round(user_id):
     choices = list(range(1, 8))
     strokes = st.radio("Lyönnit", choices, horizontal=True, index=choices.index(default_strokes if default_strokes in choices else 1), key=f"strokes_{hole_id}_{pos}")
     notes = st.text_input("Muistiinpanot radasta (valinnainen)", value=existing.get("notes", "") if existing else "", key=f"notes_{hole_id}_{pos}")
-    existing_shots = get_shots(existing["id"]) if existing else []
+    existing_shots = st.session_state.current_round_shots_map.get(existing["id"], []) if existing else []
     existing_shot_map = {s["shot_number"]: s for s in existing_shots}
     shot_rows = []
     if int(strokes) > 1:
         st.markdown("#### Lyöntikortit")
         for i in range(1, int(strokes) + 1):
             prev = existing_shot_map.get(i, {})
-            st.markdown(f"**Lyönti {i}**")
             c1, c2, c3 = st.columns(3)
             with c1:
                 went_in = st.checkbox("Sisään", value=prev.get("went_in", i == int(strokes)), key=f"in_{hole_id}_{pos}_{i}")
@@ -816,7 +875,7 @@ def render_history(user_id):
             continue
         if status_filter != "kaikki" and format_status(rnd.get("status", "completed")) != status_filter:
             continue
-        rhs = get_round_holes(rnd["id"])
+        rhs = fetch_round_holes(rnd["id"])
         total = sum(r.get("total_strokes", 0) for r in rhs)
         color = band_for_score(course.get("surface"), total)[1]
         rows.append({"round_id": rnd["id"], "Päivä": rnd.get("played_at"), "Kenttä": course.get("name", "Tuntematon"), "Tyyppi": rnd.get("round_type", "harjoitus"), "Tila": format_status(rnd.get("status", "completed")), "Alusta": course.get("surface") or "–", "Par": PAR_BY_SURFACE.get(course.get("surface"), "–"), "Ratoja": len(rhs), "Tulos": total, "Muistiinpanot": rnd.get("notes") or "", "color": color})
@@ -841,9 +900,10 @@ def render_history(user_id):
     selected_label = st.selectbox("Valitse kierros", list(round_map.keys()))
     selected_round_id = round_map[selected_label]
     round_record = get_round(selected_round_id)
-    rhs = get_round_holes(selected_round_id)
+    rhs = fetch_round_holes(selected_round_id)
     if round_record and round_record.get("status") == "draft" and st.button("Jatka tätä keskeneräistä kierrosta"):
         load_round_into_state(round_record)
+        st.session_state.view = "Kierros"
         st.rerun()
     with st.form("edit_round_form"):
         round_type = st.selectbox("Kierroksen tyyppi", ROUND_TYPE_OPTIONS, index=ROUND_TYPE_OPTIONS.index(round_record.get("round_type", "harjoitus")) if round_record.get("round_type", "harjoitus") in ROUND_TYPE_OPTIONS else 0)
@@ -851,14 +911,13 @@ def render_history(user_id):
         notes = st.text_area("Kierroksen muistiinpanot", value=round_record.get("notes") or "")
         edited_scores = {}
         for rh in rhs:
-            course_hole = safe_data(supabase.table("course_holes").select("hole_number").eq("id", rh["course_hole_id"]).execute())
-            hole_no = course_hole[0]["hole_number"] if course_hole else rh.get("hole_sequence_number")
-            edited_scores[rh["id"]] = st.number_input(f"Rata {hole_no} – lyönnit", min_value=1, max_value=20, value=int(rh.get("total_strokes", 1)), step=1, key=f"edit_rh_{rh['id']}")
+            edited_scores[rh["id"]] = st.number_input(f"Rata {rh.get('hole_sequence_number')} – lyönnit", min_value=1, max_value=20, value=int(rh.get("total_strokes", 1)), step=1, key=f"edit_rh_{rh['id']}")
         if st.form_submit_button("Tallenna muutokset"):
             try:
                 update_round_meta(selected_round_id, round_type, notes, STATUS_LABEL_TO_VALUE[status_ui])
                 for rh in rhs:
                     supabase.table("round_holes").update({"total_strokes": int(edited_scores[rh['id']]), "went_straight_in": int(edited_scores[rh['id']]) == 1}).eq("id", rh["id"]).execute()
+                clear_app_caches()
                 st.success("Kierros päivitetty.")
                 st.rerun()
             except Exception as e:
@@ -922,23 +981,21 @@ def render_profile_tab(user_id):
 
 def main_view():
     user_id = current_user_id()
-    profile = get_profile(user_id)
-    title_block("Bankontoret", f"Kirjautunut: {(profile or {}).get('display_name') or 'Pelaaja'}")
+    render_topbar(user_id)
     if is_admin():
         st.info("Olet pääkäyttäjä. Voit muokata kenttiä, ratoja ja poistaa kenttiä.")
-    render_sidebar(user_id)
-    tabs = st.tabs(["Etusivu", "Kentät", "Kierros", "Historia", "Analyysi", "Profiili"])
-    with tabs[0]:
+    view = st.session_state.view
+    if view == "Etusivu":
         render_dashboard(user_id)
-    with tabs[1]:
+    elif view == "Kentät":
         render_courses(user_id)
-    with tabs[2]:
+    elif view == "Kierros":
         render_new_round(user_id)
-    with tabs[3]:
+    elif view == "Historia":
         render_history(user_id)
-    with tabs[4]:
+    elif view == "Analyysi":
         render_analysis(user_id)
-    with tabs[5]:
+    elif view == "Profiili":
         render_profile_tab(user_id)
 
 
